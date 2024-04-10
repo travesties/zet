@@ -80,7 +80,8 @@ highly searchable. More info here: https://rwx.gg/lang/md/
 			log.Fatalf("zet create: %v\n", err)
 		}
 
-		editCmd := exec.Command(viper.GetString("editor"), zettel.File.Name())
+		editor := viper.GetString("editor")
+		editCmd := exec.Command(editor, zettel.File.Name())
 		editCmd.Stdout = os.Stdout
 		editCmd.Stdin = os.Stdin
 		editCmd.Stderr = os.Stderr
@@ -98,7 +99,8 @@ highly searchable. More info here: https://rwx.gg/lang/md/
 
 // Creates a zettel entry at the given path
 func createZettel(path string) (*Zettel, error) {
-	wrapperDir := fmt.Sprintf("%v/%v", path, generateIsosec())
+	isosec := generateIsosec()
+	wrapperDir := fmt.Sprintf("%v/%v", path, isosec)
 	err := os.Mkdir(wrapperDir, 0777)
 	if err != nil {
 		return nil, err
@@ -111,6 +113,9 @@ func createZettel(path string) (*Zettel, error) {
 		return nil, err
 	}
 	defer zettelFile.Close()
+
+	// pre-fill id into title string
+	zettelFile.WriteString(fmt.Sprintf("# %v", isosec))
 
 	zettel := Zettel{File: zettelFile, Path: wrapperDir}
 	return &zettel, nil
