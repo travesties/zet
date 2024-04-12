@@ -17,20 +17,35 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
+	"strings"
+	"syscall"
 	"time"
 
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/exp/maps"
 )
 
 type Zettel struct {
+	Id   string
 	Path string
 	File *os.File
+}
+
+type ErrNotFound struct {
+	error
+	Key string
 }
 
 var cfgFile string
@@ -93,8 +108,93 @@ highly searchable. More info here: https://rwx.gg/lang/md/
 
 		fmt.Printf("zet created: %v\n", zettel.File.Name())
 
-		// TODO: Add go-git implementation to automatically commit and push new zettel
+		// Attempt to find git repo within parent dirs
+		repo, err := git.PlainOpenWithOptions(zettel.Path, &git.PlainOpenOptions{
+			DetectDotGit: true,
+		})
+		if err != nil {
+			// Bail if not a git repository
+			return
+		}
+
+		doPush := getConfirmation("Commit and push zettel?")
+		if !doPush {
+			return
+		}
+
+		// Get git username and email. Try local first, and default to global.
+		username, userErr := localGitConfig("user.name")
+		email, emailErr := localGitConfig("user.email")
+		if userErr != nil || emailErr != nil {
+			username, userErr = globalGitConfig("user.name")
+			email, emailErr = globalGitConfig("user.email")
+		}
+
+		if username == "" || email == "" {
+			log.Fatal("git config: missing user.name and user.email")
+		}
+
+		wtree, err := repo.Worktree()
+		checkIfError(err)
+
+		// Get worktree status to get staging path for new zettel
+		status, err := wtree.Status()
+		checkIfError(err)
+
+		detectedChanges := maps.Keys(status)
+		if len(detectedChanges) == 0 {
+			log.Fatal("git: no changes detected")
+		}
+
+		// Find change path for this zettel (there could be unrelated changes)
+		var change string
+		for i := range len(detectedChanges) {
+			if strings.Contains(detectedChanges[i], zettel.Id) {
+				change = detectedChanges[i]
+				break
+			}
+		}
+
+		if change == "" {
+			log.Fatalf("git: detected no changes for zettel %s", zettel.Id)
+		}
+
+		_, err = wtree.Add(change)
+		checkIfError(err)
+
+		commitMsg := fmt.Sprintf("Add zettel %s", zettel.Id)
+		commit, err := wtree.Commit(commitMsg, &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  username,
+				Email: email,
+				When:  time.Now(),
+			},
+		})
+		checkIfError(err)
+
+		commitObj, err := repo.CommitObject(commit)
+		checkIfError(err)
+
+		authMethod, err := ssh.DefaultAuthBuilder("git")
+		checkIfError(err)
+
+		err = repo.Push(&git.PushOptions{
+			RemoteName: "origin",
+			Auth:       authMethod,
+		})
+		checkIfError(err)
+
+		fmt.Printf("\n%v", commitObj)
+		fmt.Println("\npush complete")
 	},
+}
+
+func checkIfError(err error) {
+	if err == nil {
+		return
+	}
+
+	log.Fatal(err)
 }
 
 // Creates a zettel entry at the given path
@@ -117,7 +217,7 @@ func createZettel(path string) (*Zettel, error) {
 	// pre-fill id into title string
 	zettelFile.WriteString(fmt.Sprintf("# %v", isosec))
 
-	zettel := Zettel{File: zettelFile, Path: wrapperDir}
+	zettel := Zettel{Id: isosec, File: zettelFile, Path: wrapperDir}
 	return &zettel, nil
 }
 
@@ -125,6 +225,55 @@ func createZettel(path string) (*Zettel, error) {
 // https://pkg.go.dev/time#example-Time.Format
 func generateIsosec() string {
 	return time.Now().UTC().Format("20060102150405")
+}
+
+func getConfirmation(prompt string) bool {
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Printf("%s [y/n]: ", prompt)
+
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		response = strings.ToLower(strings.TrimSpace(response))
+
+		if response == "y" || response == "yes" {
+			return true
+		} else if response == "n" || response == "no" {
+			return false
+		}
+	}
+}
+
+func execGitConfig(args ...string) (string, error) {
+	gitArgs := append([]string{"config", "--get", "--null"}, args...)
+	var stdout bytes.Buffer
+	cmd := exec.Command("git", gitArgs...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = io.Discard
+
+	err := cmd.Run()
+	if exitError, ok := err.(*exec.ExitError); ok {
+		if waitStatus, ok := exitError.Sys().(syscall.WaitStatus); ok {
+			if waitStatus.ExitStatus() == 1 {
+				return "", &ErrNotFound{Key: args[len(args)-1]}
+			}
+		}
+		return "", err
+	}
+
+	return strings.TrimRight(stdout.String(), "\000"), nil
+}
+
+func globalGitConfig(key string) (string, error) {
+	return execGitConfig("--global", key)
+}
+
+func localGitConfig(key string) (string, error) {
+	return execGitConfig("--local", key)
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
