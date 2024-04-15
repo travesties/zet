@@ -29,12 +29,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"golang.org/x/exp/maps"
+	"github.com/travesties/zet/internal/git"
 )
 
 type Zettel struct {
@@ -88,8 +85,6 @@ highly searchable. More info here: https://rwx.gg/lang/md/
 			log.Fatalf("zet create: %v\n", err)
 		}
 
-		// TODO: Create file from default template
-
 		zettel, err := createZettel(contentPath)
 		if err != nil {
 			log.Fatalf("zet create: %v\n", err)
@@ -108,83 +103,25 @@ highly searchable. More info here: https://rwx.gg/lang/md/
 
 		fmt.Printf("zet created: %v\n", zettel.File.Name())
 
-		// Attempt to find git repo within parent dirs
-		repo, err := git.PlainOpenWithOptions(zettel.Path, &git.PlainOpenOptions{
-			DetectDotGit: true,
-		})
+		fpush, err := cmd.Flags().GetBool("push")
+		checkIfError(err)
+
+		if !fpush {
+			return
+		}
+
+		repo, err := git.GetRepository(zettel.Path)
+
+		// Bail if the zettel's directory is not within a git repo.
 		if err != nil {
-			// Bail if not a git repository
+			fmt.Println("new zettel is not in a git repository. done.")
 			return
 		}
 
-		doPush := getConfirmation("Commit and push zettel?")
-		if !doPush {
-			return
-		}
-
-		// Get git username and email. Try local first, and default to global.
-		username, userErr := localGitConfig("user.name")
-		email, emailErr := localGitConfig("user.email")
-		if userErr != nil || emailErr != nil {
-			username, userErr = globalGitConfig("user.name")
-			email, emailErr = globalGitConfig("user.email")
-		}
-
-		if username == "" || email == "" {
-			log.Fatal("git config: missing user.name and user.email")
-		}
-
-		wtree, err := repo.Worktree()
+		commit, err := git.PushZettel(zettel.Id, repo)
 		checkIfError(err)
 
-		// Get worktree status to get staging path for new zettel
-		status, err := wtree.Status()
-		checkIfError(err)
-
-		detectedChanges := maps.Keys(status)
-		if len(detectedChanges) == 0 {
-			log.Fatal("git: no changes detected")
-		}
-
-		// Find change path for this zettel (there could be unrelated changes)
-		var change string
-		for i := range len(detectedChanges) {
-			if strings.Contains(detectedChanges[i], zettel.Id) {
-				change = detectedChanges[i]
-				break
-			}
-		}
-
-		if change == "" {
-			log.Fatalf("git: detected no changes for zettel %s", zettel.Id)
-		}
-
-		_, err = wtree.Add(change)
-		checkIfError(err)
-
-		commitMsg := fmt.Sprintf("Add zettel %s", zettel.Id)
-		commit, err := wtree.Commit(commitMsg, &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  username,
-				Email: email,
-				When:  time.Now(),
-			},
-		})
-		checkIfError(err)
-
-		commitObj, err := repo.CommitObject(commit)
-		checkIfError(err)
-
-		authMethod, err := ssh.DefaultAuthBuilder("git")
-		checkIfError(err)
-
-		err = repo.Push(&git.PushOptions{
-			RemoteName: "origin",
-			Auth:       authMethod,
-		})
-		checkIfError(err)
-
-		fmt.Printf("\n%v", commitObj)
+		fmt.Printf("\n%v", commit)
 		fmt.Println("\npush complete")
 	},
 }
@@ -248,34 +185,6 @@ func getConfirmation(prompt string) bool {
 	}
 }
 
-func execGitConfig(args ...string) (string, error) {
-	gitArgs := append([]string{"config", "--get", "--null"}, args...)
-	var stdout bytes.Buffer
-	cmd := exec.Command("git", gitArgs...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = io.Discard
-
-	err := cmd.Run()
-	if exitError, ok := err.(*exec.ExitError); ok {
-		if waitStatus, ok := exitError.Sys().(syscall.WaitStatus); ok {
-			if waitStatus.ExitStatus() == 1 {
-				return "", &ErrNotFound{Key: args[len(args)-1]}
-			}
-		}
-		return "", err
-	}
-
-	return strings.TrimRight(stdout.String(), "\000"), nil
-}
-
-func globalGitConfig(key string) (string, error) {
-	return execGitConfig("--global", key)
-}
-
-func localGitConfig(key string) (string, error) {
-	return execGitConfig("--local", key)
-}
-
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
@@ -296,7 +205,7 @@ func init() {
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
-	//rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	rootCmd.Flags().BoolP("push", "p", false, "Push zettel to remote origin after creation")
 }
 
 // initConfig reads in config file and ENV variables if set.
