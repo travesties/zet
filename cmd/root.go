@@ -18,15 +18,12 @@ package cmd
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
